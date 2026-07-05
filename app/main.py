@@ -30,12 +30,19 @@ import time
 import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import redis
+import redis.asyncio as aredis
 
 app = FastAPI(title="Distributed Rate Limiter")
 
-# Connect to Redis. In docker-compose this hostname will be "redis".
-redis_client = redis.Redis(
+# We use the ASYNC redis client, and the endpoint below is `async def`.
+# This matters a lot under concurrency: a sync endpoint in FastAPI runs
+# inside a small worker thread pool (~40 threads by default), so under
+# real concurrent load, requests queue up waiting for a free thread --
+# that's a self-inflicted bottleneck, not a Redis or network limit. An
+# async endpoint calling an async Redis client runs directly on the
+# event loop instead, so it can have thousands of requests in flight
+# without needing thousands of OS threads.
+redis_client = aredis.Redis(
     host=os.getenv("REDIS_HOST", "localhost"),
     port=int(os.getenv("REDIS_PORT", 6379)),
     decode_responses=True,
@@ -57,7 +64,7 @@ class CheckRequest(BaseModel):
 
 
 @app.post("/check")
-def check_rate_limit(req: CheckRequest):
+async def check_rate_limit(req: CheckRequest):
     now_ms = int(time.time() * 1000)
     window_ms = req.window_seconds * 1000
 
@@ -68,7 +75,7 @@ def check_rate_limit(req: CheckRequest):
     current_key = f"ratelimit:{req.client_id}:{current_window}"
     previous_key = f"ratelimit:{req.client_id}:{previous_window}"
 
-    allowed, estimated_count = check_and_increment(
+    allowed, estimated_count = await check_and_increment(
         keys=[current_key, previous_key],
         args=[req.limit, req.window_seconds, elapsed_ms],
     )
@@ -87,9 +94,9 @@ def check_rate_limit(req: CheckRequest):
 
 
 @app.get("/health")
-def health():
+async def health():
     try:
-        redis_client.ping()
+        await redis_client.ping()
         return {"status": "ok", "redis": "connected"}
-    except redis.ConnectionError:
+    except Exception:
         raise HTTPException(status_code=503, detail="redis unreachable")

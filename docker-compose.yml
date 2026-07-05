@@ -1,0 +1,54 @@
+version: "3.8"
+
+# This is the setup that actually proves the "distributed" claim:
+# 3 independent API containers, none aware of each other, all sharing
+# one Redis instance. nginx round-robins requests across them. If the
+# rate limit holds correctly no matter which instance handles a given
+# request, that's proof the atomicity lives in Redis, not in any one
+# process's memory.
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api1:
+    build: .
+    environment:
+      - REDIS_HOST=redis
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  api2:
+    build: .
+    environment:
+      - REDIS_HOST=redis
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  api3:
+    build: .
+    environment:
+      - REDIS_HOST=redis
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api1
+      - api2
+      - api3
