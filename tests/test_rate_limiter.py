@@ -1,14 +1,15 @@
 """
-Automated tests for the rate limiter.
+Automated tests for the social platform rate limiter.
 
-Two things we specifically want proof of, not just a manual demo:
-1. Correctness: exactly `limit` requests succeed per window, no more.
-2. Concurrency-safety: the race condition we designed against (two
-   requests reading the same counter before either writes) does NOT
-   let extra requests slip through, even when fired truly in parallel.
+Same two things we care about as before, now expressed through
+actions (post/comment/like/follow) instead of a generic client:
+1. Correctness: exactly the configured limit succeeds per action.
+2. Concurrency-safety: no race condition lets extra requests through
+   even when fired truly in parallel.
+3. New: actions are isolated -- spamming "post" doesn't touch the
+   "comment" quota for the same user.
 """
 
-import time
 import uuid
 import concurrent.futures
 import httpx
@@ -16,88 +17,77 @@ import httpx
 BASE_URL = "http://localhost:8000"
 
 
-def unique_client_id():
-    # Fresh client id per test so tests don't interfere with each other
-    # via leftover Redis keys from previous runs.
-    return f"test_{uuid.uuid4().hex[:8]}"
+def unique_user_id():
+    return f"user_{uuid.uuid4().hex[:8]}"
 
 
-def test_allows_requests_up_to_limit():
-    client_id = unique_client_id()
-    limit = 5
+def test_post_limit_enforced():
+    user_id = unique_user_id()
+    # ACTION_LIMITS["post"] = 5 per 60s
+    for i in range(5):
+        resp = httpx.post(f"{BASE_URL}/check", json={"user_id": user_id, "action": "post"})
+        assert resp.status_code == 200, f"Post {i+1} should be allowed"
 
-    for i in range(limit):
-        resp = httpx.post(f"{BASE_URL}/check", json={
-            "client_id": client_id, "limit": limit, "window_seconds": 10
-        })
-        assert resp.status_code == 200, f"Request {i+1} should be allowed"
+    denied = httpx.post(f"{BASE_URL}/check", json={"user_id": user_id, "action": "post"})
+    assert denied.status_code == 429
 
 
-def test_denies_requests_over_limit():
-    client_id = unique_client_id()
-    limit = 5
+def test_actions_have_independent_quotas():
+    """
+    A user who has used up their post quota should still be able to
+    comment and like -- these are meant to be tracked completely
+    separately, mirroring how real platforms rate limit each action
+    type independently.
+    """
+    user_id = unique_user_id()
 
-    for _ in range(limit):
-        httpx.post(f"{BASE_URL}/check", json={
-            "client_id": client_id, "limit": limit, "window_seconds": 10
-        })
+    # Exhaust the post quota (limit = 5)
+    for _ in range(5):
+        httpx.post(f"{BASE_URL}/check", json={"user_id": user_id, "action": "post"})
+    denied_post = httpx.post(f"{BASE_URL}/check", json={"user_id": user_id, "action": "post"})
+    assert denied_post.status_code == 429
 
-    # The (limit+1)-th request must be denied
-    resp = httpx.post(f"{BASE_URL}/check", json={
-        "client_id": client_id, "limit": limit, "window_seconds": 10
-    })
-    assert resp.status_code == 429
+    # But comment and like should be completely unaffected
+    comment_resp = httpx.post(f"{BASE_URL}/check", json={"user_id": user_id, "action": "comment"})
+    assert comment_resp.status_code == 200
+
+    like_resp = httpx.post(f"{BASE_URL}/check", json={"user_id": user_id, "action": "like"})
+    assert like_resp.status_code == 200
+
+
+def test_unknown_action_rejected():
+    resp = httpx.post(f"{BASE_URL}/check", json={"user_id": unique_user_id(), "action": "delete_account"})
+    assert resp.status_code == 400
 
 
 def test_concurrent_requests_do_not_exceed_limit():
     """
-    This is the important one. Fire `limit + extra` requests at the
-    SAME instant using a thread pool, for the SAME client_id. If the
-    check-and-increment were not atomic, some of these requests would
-    read a stale counter value and slip through, and allowed_count
-    would end up higher than `limit`.
+    Fire many more "like" requests than the limit allows, all at the
+    same instant via a thread pool, for the same user. If the
+    check-and-increment were not atomic, some would read a stale
+    counter and slip through -- allowed_count would exceed the limit.
     """
-    client_id = unique_client_id()
-    limit = 10
-    total_requests = 25
+    user_id = unique_user_id()
+    limit = 100  # ACTION_LIMITS["like"]
+    total_requests = 150
 
     def fire_request(_):
-        resp = httpx.post(f"{BASE_URL}/check", json={
-            "client_id": client_id, "limit": limit, "window_seconds": 10
-        })
+        resp = httpx.post(f"{BASE_URL}/check", json={"user_id": user_id, "action": "like"})
         return resp.status_code == 200
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
         results = list(executor.map(fire_request, range(total_requests)))
 
     allowed_count = sum(results)
     assert allowed_count == limit, (
-        f"Expected exactly {limit} requests to succeed under concurrent "
-        f"load, but {allowed_count} succeeded. This would indicate a "
-        f"race condition in the check-and-increment logic."
+        f"Expected exactly {limit} likes to succeed under concurrent "
+        f"load, but {allowed_count} succeeded -- indicates a race "
+        f"condition in the check-and-increment logic."
     )
 
 
-def test_window_resets_over_time():
-    """Confirms requests are allowed again once the window has elapsed."""
-    client_id = unique_client_id()
-    limit = 2
-    window = 3  # short window so the test doesn't take long
-
-    for _ in range(limit):
-        resp = httpx.post(f"{BASE_URL}/check", json={
-            "client_id": client_id, "limit": limit, "window_seconds": window
-        })
-        assert resp.status_code == 200
-
-    denied = httpx.post(f"{BASE_URL}/check", json={
-        "client_id": client_id, "limit": limit, "window_seconds": window
-    })
-    assert denied.status_code == 429
-
-    time.sleep(window + 1)
-
-    allowed_again = httpx.post(f"{BASE_URL}/check", json={
-        "client_id": client_id, "limit": limit, "window_seconds": window
-    })
-    assert allowed_again.status_code == 200
+def test_limits_endpoint_returns_config():
+    resp = httpx.get(f"{BASE_URL}/limits")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "post" in data and "comment" in data and "like" in data

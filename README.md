@@ -1,21 +1,36 @@
-# Distributed Rate Limiter
+# Social Platform API Rate Limiter
 
-A rate-limiting API service designed to work correctly across multiple
-server instances, backed by Redis for shared, atomic state.
+Rate limits per-user actions (posts, comments, likes, follows) on a
+social platform's API — e.g. max 5 posts/min, 30 comments/min, 100
+likes/min per user — and stays correct even when the API runs as
+multiple independent server replicas behind a load balancer.
 
 ## Why this exists
 
-Most simple rate limiters keep a counter in memory on a single server.
-That breaks the moment you run more than one instance behind a load
-balancer — each instance has its own counter, so a client can get
-`N x limit` requests through just by hitting different servers. This
-project solves that by keeping all state in Redis and performing the
-check-and-increment atomically via a Lua script, so any number of
-stateless app servers enforce one consistent limit.
+Real platforms limit each action type separately: spamming likes
+shouldn't use up your ability to post, and vice versa. Most simple
+rate limiters also keep counters in server memory, which breaks the
+moment you run more than one server instance — each instance has its
+own counter, so a user can get `N x limit` actions through just by
+hitting different servers. This project fixes both problems: limits
+are tracked per action, and all state lives in Redis with an atomic
+Lua script doing the check-and-increment, so any number of stateless
+app servers enforce one consistent limit per user per action.
+
+## Preset limits
+
+| Action | Limit | Window |
+|---|---|---|
+| post | 5 | 60s |
+| comment | 30 | 60s |
+| like | 100 | 60s |
+| follow | 20 | 3600s (1hr) |
+
+Configurable in `app/main.py` (`ACTION_LIMITS`).
 
 ## Algorithm: Sliding Window Counter
 
-| Algorithm | Memory per client | Accuracy | Notes |
+| Algorithm | Memory per user | Accuracy | Notes |
 |---|---|---|---|
 | Fixed window | O(1) | Allows 2x burst at window boundary | Simplest, weakest |
 | Sliding window log | O(n) requests | Perfectly accurate | Expensive at scale |
@@ -42,19 +57,33 @@ memory cost of storing every request timestamp.
                 ▼
            ┌─────────┐
            │  Redis  │   <- single source of truth,
-           └─────────┘      atomic Lua script check-and-increment
+           └─────────┘      atomic Lua script check-and-increment,
+                             keys namespaced per action per user
 ```
 
-Any number of API instances can be added or removed freely — they hold
-no state themselves, so there's nothing to synchronize between them.
+## API
+
+**POST /check**
+```json
+{
+  "user_id": "user_123",
+  "action": "post"
+}
+```
+`action` must be one of `post`, `comment`, `like`, `follow`. Returns
+`200` with `allowed: true` if under that action's limit, or `429` with
+`allowed: false` if exceeded. Returns `400` for an unrecognized action.
+
+**GET /limits** — returns the configured limits, e.g. for a frontend
+to show "you have 2 posts left this minute."
+
+**GET /health** — liveness + Redis connectivity check.
 
 ## Running locally
 
 ```bash
 pip install -r requirements.txt
-
 redis-server --daemonize yes
-
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -64,62 +93,23 @@ uvicorn app.main:app --reload --port 8000
 docker compose up --build
 ```
 
-This starts Redis, 3 independent API containers (api1, api2, api3), and
-an nginx load balancer on port 8080 that round-robins across them. Hit
-`http://localhost:8080/check` and the rate limit is enforced correctly
-no matter which of the 3 containers handles any given request — proof
-that correctness lives in Redis, not in any single process.
+Starts Redis, 3 independent API containers, and an nginx load balancer
+on port 8080 round-robining across them. The rate limit holds correctly
+no matter which container handles a given request — proof correctness
+lives in Redis, not in any single process's memory.
 
-## Benchmark results
+## Deploying for free (Render + Upstash)
 
-Measured with `tests/load_test.py` (custom async load tester, 50
-concurrent in-flight requests, 2000 total requests per scenario) on a
-single-core sandbox environment:
+1. Create a free Redis database at [upstash.com](https://upstash.com) —
+   copy the `REDIS_URL` it gives you (starts with `rediss://`).
+2. Push this repo to your own GitHub.
+3. Create a new Web Service at [render.com](https://render.com), connect
+   the repo — Render auto-detects the `Dockerfile`.
+4. Add an environment variable `REDIS_URL` with the value from step 1.
+5. Deploy. Render gives you a public URL (`https://your-app.onrender.com`).
 
-| Scenario | Throughput | p50 latency | p95 latency | p99 latency |
-|---|---|---|---|---|
-| Allow-path (unique clients, never denied) | ~222 req/s | 141 ms | 662 ms | 1160 ms |
-| Deny-path (shared client, 1900/2000 denied) | ~225 req/s | 132 ms | 673 ms | 1162 ms |
-
-Notably, throughput is nearly identical whether requests are being
-allowed or denied — the deny path returns early in the Lua script
-without extra work, so rejecting over-limit traffic doesn't cost more
-than accepting it.
-
-These numbers were measured on a single CPU core with a single
-uvicorn worker. Because the service is fully stateless (all rate-limit
-state lives in Redis, not in process memory), throughput scales
-roughly linearly by adding more worker processes or more container
-replicas behind the load balancer — this was verified directly by
-running 3 independent containers against one shared Redis instance
-and confirming they jointly enforce a single consistent limit.
-
-## Running with Docker (3 instances + nginx + Redis)
-
-```bash
-docker-compose up --build
-```
-
-This starts 3 independent API containers behind an nginx load balancer
-(port 8080), all sharing one Redis instance. Hitting `localhost:8080/check`
-repeatedly with the same `client_id` will round-robin across the 3
-containers, and the rate limit will still hold correctly -- proving the
-distributed design works, not just claiming it.
-
-## API
-
-**POST /check**
-```json
-{
-  "client_id": "some_user_or_ip",
-  "limit": 100,
-  "window_seconds": 60
-}
-```
-Returns `200` with `allowed: true` if under the limit, or `429` with
-`allowed: false` if the limit has been exceeded.
-
-**GET /health** — basic liveness + Redis connectivity check.
+The app reads `REDIS_URL` if set (see `app/main.py`), falling back to
+local `REDIS_HOST`/`REDIS_PORT` for local development.
 
 ## Tests
 
@@ -127,60 +117,50 @@ Returns `200` with `allowed: true` if under the limit, or `429` with
 pytest tests/ -v
 ```
 
-Notably includes a concurrency test that fires 25 simultaneous requests
-against a limit of 10 using a thread pool, and asserts exactly 10
-succeed — proving the atomic Lua script prevents the race condition
-that a naive read-then-write implementation would suffer from.
-
-## Proving the "distributed" part
-
-Run 3 instances on different ports pointed at the same Redis, then
-round-robin requests across all 3 for one client ID. All 3 instances
-enforce the same shared limit despite never communicating with each
-other directly — confirming correctness comes from Redis, not
-in-process state.
+5 tests, including:
+- Per-action limits enforced correctly (post limit = 5, etc.)
+- **Action isolation**: exhausting your post quota doesn't affect your
+  comment or like quota for the same user
+- **Concurrency safety**: 150 simultaneous "like" requests fired via a
+  thread pool against a limit of 100 — exactly 100 succeed, proving the
+  atomic Lua script prevents the race condition a naive
+  read-then-write implementation would suffer from
+- Unknown actions rejected with a clear 400
 
 ## Load testing
 
 ```bash
-python3 loadtest/load_test.py
+python3 tests/load_test.py
 ```
 
-Fires 5,000 requests at 100 concurrent in-flight requests across 200
-distinct client IDs (measuring service throughput, not one client's own
-limit), then reports throughput and latency percentiles (p50/p95/p99).
+Custom async load tester (no external tool needed) measuring
+throughput and p50/p95/p99 latency under concurrent load.
 
-**Note on the numbers below:** measured on a constrained, single-CPU-core
-sandbox environment, so absolute throughput isn't representative of
-production hardware — the same code on a normal multi-core machine, or
-with multiple uvicorn workers, would show substantially higher numbers.
-What the load test does prove regardless of hardware: 100% of requests
-succeeded correctly under concurrent load, confirming the async design
-doesn't introduce errors or dropped requests.
+**Measured on this single-CPU-core sandbox:** ~220-225 req/s, p50 ~140ms,
+p99 ~1.16s, with 100% of requests handled correctly (no errors, no
+dropped requests) whether they were allowed or denied. Absolute
+throughput isn't representative of production hardware — the same
+code with more cores or more replicas behind the load balancer scales
+roughly linearly, since all state lives in Redis rather than
+in-process memory. This was confirmed directly by running 3 replicas
+against one shared Redis and verifying they jointly enforce a single
+consistent limit.
 
-Example run:
-```
-Total requests:       5000
-Concurrency:          100
-Successful:           5000 (100.0%)
-Throughput:           237 req/s   (single-core sandbox; scales with cores)
-Latency (p50):        255.91 ms
-Latency (p99):        2698.02 ms
-```
-
-One real bug this surfaced during development: the endpoint was
-originally a sync `def` using the sync redis-py client. FastAPI runs
-sync endpoints in a small worker thread pool (~40 threads by default),
-so under concurrent load requests queued waiting for a free thread —
-a self-inflicted bottleneck unrelated to Redis or the network. Switching
+One real bug this surfaced during development: the endpoint originally
+used a sync `def` with the sync redis-py client. FastAPI runs sync
+endpoints in a small worker thread pool (~40 threads by default), so
+under concurrent load, requests queued waiting for a free thread — a
+self-inflicted bottleneck unrelated to Redis or the network. Switching
 to `async def` with `redis.asyncio` removed that bottleneck by running
 directly on the event loop instead.
 
-## Status / roadmap
+## Status
 
+- [x] Per-action rate limiting (post/comment/like/follow), isolated quotas
 - [x] Sliding window counter algorithm, atomic via Redis Lua script
-- [x] Automated tests including concurrency safety
+- [x] Automated tests including action isolation + concurrency safety
 - [x] Verified correctness across multiple stateless instances
 - [x] Load testing with async throughput + latency benchmarks
 - [x] Docker Compose + nginx for one-command 3-instance deployment
 - [ ] Token bucket as a second selectable algorithm (future work)
+- [ ] Deployed live instance (Render + Upstash — see deployment steps above)

@@ -1,5 +1,7 @@
 """
-Distributed rate limiter API.
+API rate limiter for a social platform: limits posts, comments, likes,
+and follows per user, independently, so a single user can't spam any
+one action even though all actions share the same underlying engine.
 
 Design notes (the stuff you'll explain in an interview):
 
@@ -22,8 +24,12 @@ Design notes (the stuff you'll explain in an interview):
    - Sliding window counter (what we use): O(1) memory per client,
      small approximation error, good enough for almost all real
      rate limiting. This is what Cloudflare and Kong use in practice.
-   - Token bucket: better for allowing controlled bursts. Good
-     stretch goal to add as a second algorithm.
+
+4. Per-action limits: each action type (post, comment, like, follow)
+   has its own limit and window, and its own Redis key namespace, so
+   spamming comments doesn't use up your post quota and vice versa.
+   This mirrors how real platforms rate limit -- Twitter/X, for
+   example, limits posts, likes, and follows completely separately.
 """
 
 import time
@@ -32,21 +38,30 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import redis.asyncio as aredis
 
-app = FastAPI(title="Distributed Rate Limiter")
+app = FastAPI(title="Social Platform Rate Limiter")
 
-# We use the ASYNC redis client, and the endpoint below is `async def`.
-# This matters a lot under concurrency: a sync endpoint in FastAPI runs
-# inside a small worker thread pool (~40 threads by default), so under
-# real concurrent load, requests queue up waiting for a free thread --
-# that's a self-inflicted bottleneck, not a Redis or network limit. An
-# async endpoint calling an async Redis client runs directly on the
-# event loop instead, so it can have thousands of requests in flight
-# without needing thousands of OS threads.
-redis_client = aredis.Redis(
-    host=os.getenv("REDIS_HOST", "localhost"),
-    port=int(os.getenv("REDIS_PORT", 6379)),
-    decode_responses=True,
-)
+# Preset limits per action. In a real system these might live in a
+# config file or admin-editable database table -- kept as a simple
+# dict here since that's not the interesting part of this project.
+ACTION_LIMITS = {
+    "post":    {"limit": 5,   "window_seconds": 60},   # 5 posts/min
+    "comment": {"limit": 30,  "window_seconds": 60},   # 30 comments/min
+    "like":    {"limit": 100, "window_seconds": 60},   # 100 likes/min
+    "follow":  {"limit": 20,  "window_seconds": 3600}, # 20 follows/hour
+}
+
+# Prefer a full connection URL (what every cloud Redis provider gives
+# you -- Upstash, Render, Railway, etc. -- including TLS via rediss://)
+# and fall back to host/port for local development.
+REDIS_URL = os.getenv("REDIS_URL")
+if REDIS_URL:
+    redis_client = aredis.from_url(REDIS_URL, decode_responses=True)
+else:
+    redis_client = aredis.Redis(
+        host=os.getenv("REDIS_HOST", "localhost"),
+        port=int(os.getenv("REDIS_PORT", 6379)),
+        decode_responses=True,
+    )
 
 # Load the Lua script once at startup and register it with Redis.
 # redis-py caches the script's SHA and re-uses it (EVALSHA) for speed
@@ -58,39 +73,63 @@ check_and_increment = redis_client.register_script(SLIDING_WINDOW_SCRIPT)
 
 
 class CheckRequest(BaseModel):
-    client_id: str
-    limit: int = 100          # max requests per window
-    window_seconds: int = 60  # window size
+    user_id: str
+    action: str  # "post", "comment", "like", or "follow"
 
 
-@app.post("/check")
-async def check_rate_limit(req: CheckRequest):
+async def _run_check(user_id: str, action: str, limit: int, window_seconds: int):
     now_ms = int(time.time() * 1000)
-    window_ms = req.window_seconds * 1000
+    window_ms = window_seconds * 1000
 
     current_window = now_ms // window_ms
     previous_window = current_window - 1
     elapsed_ms = now_ms - (current_window * window_ms)
 
-    current_key = f"ratelimit:{req.client_id}:{current_window}"
-    previous_key = f"ratelimit:{req.client_id}:{previous_window}"
+    # Namespacing by action means a user's comment count and post count
+    # are tracked as completely separate Redis keys -- spamming one
+    # action never eats into another action's quota.
+    current_key = f"ratelimit:{action}:{user_id}:{current_window}"
+    previous_key = f"ratelimit:{action}:{user_id}:{previous_window}"
 
     allowed, estimated_count = await check_and_increment(
         keys=[current_key, previous_key],
-        args=[req.limit, req.window_seconds, elapsed_ms],
+        args=[limit, window_seconds, elapsed_ms],
+    )
+    return bool(allowed), float(estimated_count)
+
+
+@app.post("/check")
+async def check_rate_limit(req: CheckRequest):
+    if req.action not in ACTION_LIMITS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown action '{req.action}'. Valid actions: {list(ACTION_LIMITS.keys())}",
+        )
+
+    config = ACTION_LIMITS[req.action]
+    allowed, estimated_count = await _run_check(
+        req.user_id, req.action, config["limit"], config["window_seconds"]
     )
 
     result = {
-        "allowed": bool(allowed),
-        "limit": req.limit,
-        "estimated_count": round(float(estimated_count), 2),
-        "window_seconds": req.window_seconds,
+        "allowed": allowed,
+        "user_id": req.user_id,
+        "action": req.action,
+        "limit": config["limit"],
+        "estimated_count": round(estimated_count, 2),
+        "window_seconds": config["window_seconds"],
     }
 
     if not allowed:
         raise HTTPException(status_code=429, detail=result)
 
     return result
+
+
+@app.get("/limits")
+async def get_limits():
+    """So a frontend/client can display 'you have X posts left' etc."""
+    return ACTION_LIMITS
 
 
 @app.get("/health")
