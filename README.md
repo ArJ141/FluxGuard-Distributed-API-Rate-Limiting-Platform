@@ -6,8 +6,7 @@ algorithms, and configuration you can change at runtime with no
 redeploy. Built to stay correct even when running as multiple
 stateless server replicas behind a load balancer.
 
-**Live demo:** deploy your own with the steps below, or view the
-dashboard locally at `http://localhost:8000/` after running it.
+**Live demo:** https://fluxguard-distributed-api-rate-limiting.onrender.com/
 
 ## What it does
 
