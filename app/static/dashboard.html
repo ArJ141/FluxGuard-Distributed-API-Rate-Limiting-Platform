@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FluxGuard — Distributed API Rate Limiting Platform</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0B1120;
+    --surface: #131B2E;
+    --border: #253150;
+    --text: #E4E9F5;
+    --muted: #7C89A8;
+    --flow: #35D0BA;
+    --guard: #FF6B5B;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    background-image:
+      radial-gradient(circle at 15% 0%, rgba(53,208,186,0.07), transparent 40%),
+      radial-gradient(circle at 85% 100%, rgba(255,107,91,0.06), transparent 40%);
+    color: var(--text);
+    font-family: 'IBM Plex Sans', sans-serif;
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+
+  a { color: var(--flow); }
+
+  .wrap {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 32px 24px 80px;
+  }
+
+  /* ---------- Header ---------- */
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 20px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 28px;
+    margin-bottom: 36px;
+  }
+
+  .brand {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .wordmark {
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 700;
+    font-size: 34px;
+    letter-spacing: -0.01em;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .wordmark .flux { color: var(--flow); }
+  .wordmark .guard { color: var(--guard); }
+
+  .tagline {
+    color: var(--muted);
+    font-size: 14.5px;
+    max-width: 480px;
+  }
+
+  .status-pill {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 8px 14px;
+    border-radius: 999px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12.5px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--flow);
+    box-shadow: 0 0 8px var(--flow);
+  }
+  .dot.down { background: var(--guard); box-shadow: 0 0 8px var(--guard); }
+
+  .admin-box {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .admin-box input {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12.5px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    width: 160px;
+  }
+
+  .admin-box input:focus { outline: none; border-color: var(--flow); }
+
+  /* ---------- Section labels ---------- */
+  .section-label {
+    font-family: 'IBM Plex Mono', monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 16px;
+  }
+
+  /* ---------- Lanes (the signature element) ---------- */
+  .lanes {
+    display: grid;
+    gap: 14px;
+    margin-bottom: 48px;
+  }
+
+  .lane {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px 20px;
+    display: grid;
+    grid-template-columns: 150px 1fr 220px;
+    align-items: center;
+    gap: 18px;
+    transition: border-color 0.3s ease;
+  }
+
+  .lane.flash-allow { border-color: var(--flow); }
+  .lane.flash-deny { border-color: var(--guard); }
+
+  .lane-id {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .lane-name {
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 600;
+    font-size: 17px;
+    text-transform: capitalize;
+  }
+
+  .lane-algo {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  /* the track: request pulses travel across this to the gate */
+  .track {
+    position: relative;
+    height: 34px;
+    background: linear-gradient(90deg, transparent, var(--border) 85%, var(--border) 100%);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  .gate {
+    position: absolute;
+    right: 0; top: 0; bottom: 0;
+    width: 6px;
+    background: var(--muted);
+    transition: background 0.15s ease, box-shadow 0.15s ease;
+  }
+
+  .gate.pulse-allow { background: var(--flow); box-shadow: 0 0 14px var(--flow); }
+  .gate.pulse-deny { background: var(--guard); box-shadow: 0 0 14px var(--guard); }
+
+  .pulse {
+    position: absolute;
+    top: 50%;
+    left: 8px;
+    width: 10px; height: 10px;
+    margin-top: -5px;
+    border-radius: 50%;
+    background: var(--flow);
+    box-shadow: 0 0 8px var(--flow);
+    animation: travel 0.55s ease-out forwards;
+  }
+
+  .pulse.deny-pulse {
+    background: var(--guard);
+    box-shadow: 0 0 8px var(--guard);
+    animation: travel-deny 0.55s ease-out forwards;
+  }
+
+  @keyframes travel {
+    from { left: 8px; opacity: 1; }
+    to   { left: calc(100% - 16px); opacity: 0; }
+  }
+  @keyframes travel-deny {
+    0%   { left: 8px; opacity: 1; }
+    70%  { left: calc(100% - 22px); opacity: 1; }
+    100% { left: calc(100% - 60px); opacity: 0; }
+  }
+
+  .lane-readout {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+  }
+
+  .count {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 15px;
+  }
+  .count .limit { color: var(--muted); }
+
+  .lane-buttons { display: flex; gap: 8px; }
+
+  button {
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 12.5px;
+    font-weight: 500;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text);
+    padding: 7px 12px;
+    cursor: pointer;
+    transition: border-color 0.2s ease, color 0.2s ease;
+  }
+  button:hover { border-color: var(--flow); color: var(--flow); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  button.primary {
+    background: var(--flow);
+    color: #08131A;
+    border-color: var(--flow);
+    font-weight: 600;
+  }
+  button.primary:hover { color: #08131A; filter: brightness(1.08); }
+
+  /* ---------- Config editor (inline, per lane) ---------- */
+  .editor {
+    grid-column: 1 / -1;
+    display: none;
+    gap: 12px;
+    border-top: 1px solid var(--border);
+    margin-top: 14px;
+    padding-top: 14px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .editor.open { display: flex; }
+
+  .editor label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    color: var(--muted);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .editor input, .editor select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    width: 110px;
+  }
+
+  /* ---------- Benchmark section ---------- */
+  .bench-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 24px;
+  }
+
+  .bench-controls {
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    margin-bottom: 20px;
+  }
+
+  .bench-controls label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    color: var(--muted);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .bench-controls input, .bench-controls select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    padding: 7px 9px;
+    border-radius: 6px;
+    width: 130px;
+  }
+
+  .bench-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 14px;
+    margin-bottom: 20px;
+  }
+
+  .stat {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+  }
+
+  .stat .label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+
+  .stat .value {
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 600;
+    font-size: 22px;
+  }
+
+  .stat .value.allow { color: var(--flow); }
+  .stat .value.deny { color: var(--guard); }
+
+  .chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 100px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 2px;
+  }
+
+  .bar {
+    flex: 1;
+    min-width: 2px;
+    border-radius: 2px 2px 0 0;
+    background: var(--flow);
+    transition: height 0.2s ease;
+  }
+  .bar.denied { background: var(--guard); }
+
+  .bench-note {
+    color: var(--muted);
+    font-size: 12.5px;
+    margin-top: 14px;
+  }
+
+  .bench-note code {
+    font-family: 'IBM Plex Mono', monospace;
+    background: var(--bg);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+
+  footer {
+    margin-top: 56px;
+    color: var(--muted);
+    font-size: 12.5px;
+    text-align: center;
+  }
+
+  @media (max-width: 720px) {
+    .lane { grid-template-columns: 1fr; }
+    .lane-readout { align-items: flex-start; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand">
+      <div class="wordmark"><span class="flux">Flux</span><span class="guard">Guard</span></div>
+      <div class="tagline">Distributed rate limiting for social platform APIs — per-action limits, live config, two selectable algorithms, all backed by one shared Redis so any number of stateless replicas agree on the same limit.</div>
+    </div>
+    <div style="display:flex; flex-direction:column; gap:10px; align-items:flex-end;">
+      <div class="status-pill"><span class="dot" id="status-dot"></span><span id="status-text">checking...</span></div>
+      <div class="admin-box">
+        <input type="password" id="admin-key" placeholder="admin key (to edit config)">
+        <button id="save-key-btn">Unlock</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="section-label">// Live gates — one lane per action, shared across every replica via Redis</div>
+  <div class="lanes" id="lanes"></div>
+
+  <div class="section-label">// Traffic simulator — fires real requests at /check and measures real latency</div>
+  <div class="bench-card">
+    <div class="bench-controls">
+      <label>Action
+        <select id="bench-action">
+          <option value="post">post</option>
+          <option value="comment">comment</option>
+          <option value="like" selected>like</option>
+          <option value="follow">follow</option>
+        </select>
+      </label>
+      <label>Concurrent requests
+        <input type="number" id="bench-count" value="60" min="1" max="500">
+      </label>
+      <label>User ID
+        <input type="text" id="bench-user" value="bench_user_1">
+      </label>
+      <button class="primary" id="run-bench-btn">Run burst</button>
+    </div>
+
+    <div class="bench-stats">
+      <div class="stat"><div class="label">Allowed</div><div class="value allow" id="stat-allowed">—</div></div>
+      <div class="stat"><div class="label">Denied</div><div class="value deny" id="stat-denied">—</div></div>
+      <div class="stat"><div class="label">Throughput</div><div class="value" id="stat-throughput">—</div></div>
+      <div class="stat"><div class="label">p50 latency</div><div class="value" id="stat-p50">—</div></div>
+      <div class="stat"><div class="label">p95 latency</div><div class="value" id="stat-p95">—</div></div>
+      <div class="stat"><div class="label">p99 latency</div><div class="value" id="stat-p99">—</div></div>
+    </div>
+
+    <div class="chart" id="chart"></div>
+    <div class="bench-note">Each bar is one request from this burst, ordered by completion time and colored by outcome. Fired client-side with <code>Promise.all</code> straight at <code>/check</code> — no simulated data.</div>
+  </div>
+
+  <footer>FluxGuard — sliding window &amp; token bucket rate limiting, atomic via Redis Lua scripting, stateless across replicas.</footer>
+</div>
+
+<script>
+const ACTIONS = ["post", "comment", "like", "follow"];
+let adminKey = localStorage.getItem("fluxguard_admin_key") || "";
+document.getElementById("admin-key").value = adminKey;
+
+function fmtWindow(s) {
+  if (s >= 3600) return (s/3600) + "h";
+  if (s >= 60) return (s/60) + "m";
+  return s + "s";
+}
+
+async function fetchLimits() {
+  const res = await fetch("/limits");
+  return res.json();
+}
+
+function renderLanes(config) {
+  const container = document.getElementById("lanes");
+  container.innerHTML = "";
+  ACTIONS.forEach(action => {
+    const cfg = config[action];
+    const lane = document.createElement("div");
+    lane.className = "lane";
+    lane.id = `lane-${action}`;
+    lane.innerHTML = `
+      <div class="lane-id">
+        <div class="lane-name">${action}</div>
+        <div class="lane-algo">${cfg.algorithm.replace('_',' ')}</div>
+      </div>
+      <div class="track"><div class="gate" id="gate-${action}"></div></div>
+      <div class="lane-readout">
+        <div class="count"><span id="count-${action}">${cfg.limit}</span><span class="limit">/${cfg.limit} · ${fmtWindow(cfg.window_seconds)}</span></div>
+        <div class="lane-buttons">
+          <button onclick="sendCheck('${action}')">Send request</button>
+          <button onclick="toggleEditor('${action}')">Edit</button>
+        </div>
+      </div>
+      <div class="editor" id="editor-${action}">
+        <label>Limit <input type="number" id="edit-limit-${action}" value="${cfg.limit}"></label>
+        <label>Window (s) <input type="number" id="edit-window-${action}" value="${cfg.window_seconds}"></label>
+        <label>Algorithm
+          <select id="edit-algo-${action}">
+            <option value="sliding_window" ${cfg.algorithm==='sliding_window'?'selected':''}>sliding_window</option>
+            <option value="token_bucket" ${cfg.algorithm==='token_bucket'?'selected':''}>token_bucket</option>
+          </select>
+        </label>
+        <button class="primary" onclick="saveConfig('${action}')" style="align-self:flex-end;">Save</button>
+      </div>
+    `;
+    container.appendChild(lane);
+  });
+}
+
+function toggleEditor(action) {
+  document.getElementById(`editor-${action}`).classList.toggle("open");
+}
+
+async function saveConfig(action) {
+  if (!adminKey) { alert("Enter your admin key and click Unlock first."); return; }
+  const limit = parseInt(document.getElementById(`edit-limit-${action}`).value);
+  const window_seconds = parseInt(document.getElementById(`edit-window-${action}`).value);
+  const algorithm = document.getElementById(`edit-algo-${action}`).value;
+
+  const res = await fetch(`/admin/config/${action}`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json", "X-Admin-Key": adminKey},
+    body: JSON.stringify({limit, window_seconds, algorithm})
+  });
+
+  if (res.status === 401) { alert("Admin key rejected."); return; }
+  if (!res.ok) { alert("Update failed: " + (await res.text())); return; }
+
+  const config = await fetchLimits();
+  renderLanes(config);
+}
+
+function fireGate(action, allowed) {
+  const lane = document.getElementById(`lane-${action}`);
+  const gate = document.getElementById(`gate-${action}`);
+  const track = gate.parentElement;
+
+  const pulse = document.createElement("div");
+  pulse.className = allowed ? "pulse" : "pulse deny-pulse";
+  track.appendChild(pulse);
+  setTimeout(() => pulse.remove(), 600);
+
+  gate.classList.add(allowed ? "pulse-allow" : "pulse-deny");
+  lane.classList.add(allowed ? "flash-allow" : "flash-deny");
+  setTimeout(() => {
+    gate.classList.remove("pulse-allow", "pulse-deny");
+    lane.classList.remove("flash-allow", "flash-deny");
+  }, 400);
+}
+
+async function sendCheck(action) {
+  try {
+    const res = await fetch("/check", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({user_id: "dashboard_demo_user", action})
+    });
+    const data = res.status === 429 ? (await res.json()).detail : await res.json();
+    fireGate(action, res.ok);
+    const countEl = document.getElementById(`count-${action}`);
+    if (countEl) countEl.textContent = Math.min(data.estimated_count, data.limit).toFixed(0);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+document.getElementById("save-key-btn").onclick = () => {
+  adminKey = document.getElementById("admin-key").value.trim();
+  localStorage.setItem("fluxguard_admin_key", adminKey);
+  document.getElementById("save-key-btn").textContent = "Unlocked";
+  setTimeout(() => document.getElementById("save-key-btn").textContent = "Unlock", 1200);
+};
+
+async function checkHealth() {
+  const dot = document.getElementById("status-dot");
+  const text = document.getElementById("status-text");
+  try {
+    const res = await fetch("/health");
+    if (res.ok) {
+      dot.classList.remove("down");
+      text.textContent = "redis connected";
+    } else {
+      throw new Error("unhealthy");
+    }
+  } catch (e) {
+    dot.classList.add("down");
+    text.textContent = "unreachable";
+  }
+}
+
+// ---------- Benchmark ----------
+document.getElementById("run-bench-btn").onclick = async () => {
+  const btn = document.getElementById("run-bench-btn");
+  btn.disabled = true;
+  btn.textContent = "Running...";
+
+  const action = document.getElementById("bench-action").value;
+  const count = parseInt(document.getElementById("bench-count").value);
+  const userBase = document.getElementById("bench-user").value;
+
+  const tasks = [];
+  for (let i = 0; i < count; i++) {
+    tasks.push((async () => {
+      const start = performance.now();
+      let allowed;
+      try {
+        const res = await fetch("/check", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({user_id: userBase, action})
+        });
+        allowed = res.ok;
+      } catch (e) {
+        allowed = false;
+      }
+      const latency = performance.now() - start;
+      return {allowed, latency};
+    })());
+  }
+
+  const startAll = performance.now();
+  const results = await Promise.all(tasks);
+  const totalTime = (performance.now() - startAll) / 1000;
+
+  const allowedCount = results.filter(r => r.allowed).length;
+  const deniedCount = results.length - allowedCount;
+  const latencies = results.map(r => r.latency).sort((a,b) => a-b);
+  const pct = p => latencies[Math.min(latencies.length-1, Math.floor(latencies.length * p))];
+
+  document.getElementById("stat-allowed").textContent = allowedCount;
+  document.getElementById("stat-denied").textContent = deniedCount;
+  document.getElementById("stat-throughput").textContent = (count/totalTime).toFixed(1) + "/s";
+  document.getElementById("stat-p50").textContent = pct(0.50).toFixed(0) + "ms";
+  document.getElementById("stat-p95").textContent = pct(0.95).toFixed(0) + "ms";
+  document.getElementById("stat-p99").textContent = pct(0.99).toFixed(0) + "ms";
+
+  const chart = document.getElementById("chart");
+  chart.innerHTML = "";
+  const maxLatency = Math.max(...results.map(r => r.latency));
+  results.forEach(r => {
+    const bar = document.createElement("div");
+    bar.className = "bar" + (r.allowed ? "" : " denied");
+    bar.style.height = Math.max(4, (r.latency / maxLatency) * 100) + "px";
+    bar.title = `${r.allowed ? "allowed" : "denied"} · ${r.latency.toFixed(0)}ms`;
+    chart.appendChild(bar);
+  });
+
+  const config = await fetchLimits();
+  renderLanes(config);
+
+  btn.disabled = false;
+  btn.textContent = "Run burst";
+};
+
+// ---------- Init ----------
+(async function init() {
+  const config = await fetchLimits();
+  renderLanes(config);
+  checkHealth();
+  setInterval(checkHealth, 15000);
+})();
+</script>
+</body>
+</html>
